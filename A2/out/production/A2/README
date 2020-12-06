@@ -1,0 +1,631 @@
+CS456 Assignment 2
+
+Name: Xinyin Zhang
+ID#: 20620942
+
+How to compile and make the programs:
+    - to compile the programs: type “make”
+    - to remove executable files: type "make clean"
+
+Which machines:
+    -Emulator: ubuntu1804-004
+    -Receiver: ubuntu1804-002
+    -Sender: ubuntu1804-008
+
+how to run the program:
+    on 004:
+    chmod +x ./nEmulator-linux386
+    ./nEmulator-linux386 1781 ubuntu1804-002 9995 21794 ubuntu1804-008 9998 1 0 1
+    on 002:
+    java Receiver ubuntu1804-004 21794 9995 “outputFile.txt”
+    on 008:
+    java Sender ubuntu1804-004 1781 9998 “inputFile.txt”
+
+Which compiler:
+    -javac
+
+
+
+//read the file
+byte[] data;
+File file = new File(filename);
+BufferedReader reader = null;
+String str = null;
+try {
+    System.out.println("以行为单位读取文件内容，一次读一整行：");
+    reader = new BufferedReader(new FileReader(file));
+    String tempString = null;
+    while ((tempString = reader.readLine()) != null) {
+        str = str + tempString;
+    }
+    reader.close();
+} catch (IOException e) {
+    e.printStackTrace();
+}
+data = str.getBytes();
+
+
+
+//divide data into packet
+        int data_length = str.length();
+        int count = 0;
+        int num_packet = (int) Math.ceil((double) data_length / maxDataLength);
+        packet packets[] = new packet[num_packet];
+
+        for (int i = 0; i < num_packet; i++) {
+            int length = 500;
+            if (i == num_packet - 1) {
+                length = data_length - count;
+            }
+            String data_str = str.substring(count, count + length);
+            packets[i] = packet.createPacket(i % SeqNumModulo, data_str);
+            count = count + length;
+        }
+
+
+
+/////33333
+import javax.swing.tree.ExpandVetoException;
+import java.io.*;
+import java.net.*;
+import java.math.*;
+
+public class sender {
+
+
+    static final int time = 500;
+
+
+    public static void send_packet(DatagramSocket send_socket, byte []content, String Address, int dec_port) throws Exception{
+        InetAddress ip = InetAddress.getByName(Address);
+        try{
+            DatagramPacket send_packet  = new DatagramPacket(content, content.length,ip,dec_port);
+            send_socket.send(send_packet);
+        } catch(SocketException e){
+            e.printStackTrace();
+        }
+    }
+
+   static packet rec_packet(DatagramSocket rec_socket, PrintWriter Ack) throws Exception {
+
+        byte[] rec_data = new byte[512]; // since 500 for data, 4 for seq, 4 for type, 4 for data_length
+        DatagramPacket r_packet = new DatagramPacket(rec_data, rec_data.length);
+
+        //start to receive data
+        rec_socket.receive(r_packet);
+        packet rec_packet = packet.parseUDPdata(rec_data);
+
+        //write into Ack.log
+        Ack.write(rec_packet.getSeqNum());
+
+        return rec_packet;
+    }
+
+
+
+    public static void main(String[] args) throws Exception {
+        //constant
+        final int maxDataLength = 500;
+        final int SeqNumModulo = 32;
+        final int window_size = 10;
+
+        String host_address = null;
+        int emulator_port = 0;
+        int rec_port = 0;
+        String filename = null;
+
+        //our output
+        PrintWriter seq_log = new PrintWriter("seqnum.log");
+        PrintWriter ack_log = new PrintWriter("ack.log");
+
+
+        if (args.length != 4) {
+            System.out.println("Wrong parameters");
+            System.exit(0);
+        } else {
+            host_address = args[0];
+            emulator_port = Integer.parseInt(args[1]);
+            rec_port = Integer.parseInt(args[2]);
+            filename = args[3];
+        }
+
+
+        //read from file
+        File file = new File(args[3]);
+        byte sentence[] = new byte[(int)file.length()];
+        FileInputStream fileinputstream = new FileInputStream(file);
+        fileinputstream.read(sentence);
+
+        //preapare packets
+        int size = sentence.length/500;
+        int transffered = 0;
+        if (sentence.length % 500 != 0) size += 1;
+        packet packets[] = new packet[size];
+        for (int i = 0; i < size; i++) {
+            byte cp[] = new byte[Math.min(500, sentence.length - transffered)];
+            System.arraycopy(sentence, transffered, cp, 0, Math.min(500, sentence.length - transffered));
+            packets[i] = packet.createPacket(i % 32, new String(cp));
+            transffered += 500;
+        }
+
+        System.out.println("hello you are here");
+        System.out.println(size);
+        //create socket
+        DatagramSocket send_socket = new DatagramSocket(emulator_port);  //rec sends to u-emulator
+        DatagramSocket rec_socket = new DatagramSocket(rec_port); // used to receive the Data
+
+        //
+        //---------------------Now Start to send packet-----------------
+        //
+        int base = 0;
+        int next_seq = 0;
+
+       // try {
+            while (base != size) {
+
+                for (; (next_seq < window_size + base && next_seq < size); next_seq++) {
+                    //send data packet
+                    byte[] content= packets[next_seq].getUDPdata();
+                    send_packet(send_socket,content, host_address, emulator_port);
+
+                    //output to seq log
+                    seq_log.write(packets[next_seq].getSeqNum());
+
+                }
+
+                try {
+                    rec_socket.setSoTimeout(time);
+                    packet rec_packet = rec_packet(rec_socket, ack_log);
+                    int seq_num = rec_packet.getSeqNum();
+                    //ACK is received
+                    if (seq_num == window_size % SeqNumModulo) {
+                        base = base + 1;
+                    } else if ((seq_num > base % SeqNumModulo) && (seq_num - base % SeqNumModulo) < window_size) {
+                        base += seq_num - base % SeqNumModulo + 1;
+                    } else if ((seq_num < window_size) && (seq_num + 32 - base % SeqNumModulo) < window_size) {
+                        base += seq_num + 32 - base % SeqNumModulo + 1;
+                    }
+
+                } catch (SocketTimeoutException e) {
+                    //Time is out
+                    //resent the packets
+                    for (int i = base; i < (next_seq); i++) {
+                        byte[] content= packets[i].getUDPdata();
+                        send_packet(send_socket,content, host_address, emulator_port);
+                        //output to seq log
+                        seq_log.write(packets[i].getSeqNum()%SeqNumModulo);
+                    }
+                }
+
+            }
+
+
+            //------------ALL packets are sent successfully ------------
+            //            Now send the EOF packet
+            System.out.println("Hello you are here  asshole");
+            packet eof = packet.createEOT(size / SeqNumModulo);
+            byte[] data_content= eof.getUDPdata();
+            send_packet(send_socket,data_content, host_address, emulator_port);
+            System.out.println("Hello you are here  asshole X2");
+
+            while (true) {
+                System.out.println("loop");
+                try{
+                    packet eof_rec_packet = rec_packet(rec_socket, ack_log);
+                    if (eof_rec_packet.getType() == 2) {
+                        seq_log.close();
+                        ack_log.close();
+                        send_socket.close();
+                        rec_socket.close();
+                        System.exit(0);
+                    }
+                } catch (SocketTimeoutException e){
+                    continue;
+                }
+
+            }
+      //  } catch (Exception e) {
+        //    e.printStackTrace();
+        //}
+    }
+
+}
+
+
+
+//rec
+
+import java.io.*;
+import java.net.*;
+
+
+public class receiver {
+
+    public static void send_packet(DatagramSocket send_socket, byte []content, String Address, int dec_port) throws Exception{
+        InetAddress ip = InetAddress.getByName(Address);
+        try{
+            DatagramPacket send_packet  = new DatagramPacket(content, content.length,ip,dec_port);
+            send_socket.send(send_packet);
+        } catch(SocketException e){
+            e.printStackTrace();
+        }
+    }
+
+    public static void main(String[] args) throws Exception{
+        //constant
+        final int maxDataLength = 500;
+        final int SeqNumModulo = 32;
+        final int window_size = 10;
+
+        String host_address=null;
+        int emulator_port=0;
+        int rec_port=0;
+        String filename = null;
+
+        //expected seq num
+        int expect_seq=  0;
+        if(args.length != 4){
+            System.out.println("Wrong parameters");
+            System.exit(0);
+        } else {
+            host_address = args[0];
+            emulator_port = Integer.parseInt(args[1]);
+            rec_port = Integer.parseInt(args[2]);
+            filename = args[3];
+        }
+
+        //--------- OUTPUT --------
+        PrintWriter arrival_log = new PrintWriter("arrival.log");
+        PrintWriter output  = new PrintWriter(filename);
+
+
+        //create socket
+        DatagramSocket send_socket = new DatagramSocket(emulator_port);  //rec sends to u-emulator
+        DatagramSocket rec_socket = new DatagramSocket(rec_port); // used to receive the Data
+
+        //create Datagram packet
+        byte [] rec_data = new byte[512];
+        DatagramPacket r_packet = new DatagramPacket(rec_data, rec_data.length);
+
+        while(true) {
+            //create socket and receive packet
+            rec_socket.receive(r_packet);
+            /* create received packet */
+            packet rec_packet = packet.parseUDPdata(rec_data);
+
+            System.out.println("fk");
+            System.out.println(rec_packet.getType());
+            //it is our expected seq num, then send it back to sender
+            if (expect_seq == rec_packet.getSeqNum()) {
+                System.out.println("Hello you are in");
+                System.out.println("loop");
+                System.out.println(rec_packet.getType());
+                if (rec_packet.getType() == 2) { //if it is EOF packet
+                    System.out.println("Hello you are in X2");
+                    packet to_sender = packet.createEOT(rec_packet.getSeqNum());
+                    byte[] eof_data = to_sender.getUDPdata();
+
+                    System.out.println("Hello you are in X3");
+
+                    //send eof packet
+                    send_packet(send_socket,eof_data,host_address,emulator_port);
+                    System.out.println("Hello you are in X4");
+                    //end connection
+                    send_socket.close();
+                    rec_socket.close();
+                    output.close();
+                    arrival_log.close();
+                    System.exit(0);
+
+                } else { //if it is Data packet
+                    packet to_sender = packet.createACK(expect_seq);
+                    byte[] data = to_sender.getUDPdata();
+
+                    //send data packet
+                    send_packet(send_socket,data,host_address,emulator_port);
+
+                    //output to log file
+                    arrival_log.println(expect_seq);
+                    //write
+                    output.print(new String(rec_packet.getData()));
+
+                    //renew the expected seq number
+                    expect_seq = expect_seq + 1;
+                    expect_seq = expect_seq % SeqNumModulo;
+                }
+                /* if it is not our expected seq num, then discard this packet and resend the most recently received one */
+            } else {
+                int last_seq_num = 0;
+                if (expect_seq == 0) {
+                    last_seq_num = 31;
+                } else {
+                    last_seq_num = expect_seq - 1;
+                }
+
+                packet to_sender = packet.createACK(last_seq_num);
+                byte[] data = to_sender.getUDPdata();
+
+                //re-send data packet
+                send_packet(send_socket,data,host_address,emulator_port);
+            }
+
+        }
+
+    }
+}
+
+
+
+---------------today -------------
+
+import java.io.*;
+import java.net.*;
+
+
+public class receiver {
+
+    public static void send_packet(DatagramSocket send_socket, packet sendpacket, String Address, int dec_port) throws Exception{
+        byte [] content = sendpacket.getUDPdata();
+        InetAddress ip = InetAddress.getByName(Address);
+        try{
+            DatagramPacket send_packet  = new DatagramPacket(content, content.length,ip,dec_port);
+            send_socket.send(send_packet);
+        } catch(SocketException e){
+            e.printStackTrace();
+        }
+    }
+
+    public static packet rec_packet(DatagramSocket rec_socket) throws Exception {
+
+        try{
+            byte[] rec_data = new byte[1024]; // since 500 for data, 4 for seq, 4 for type, 4 for data_length
+            DatagramPacket r_packet = new DatagramPacket(rec_data, rec_data.length);
+            //start to receive data
+            rec_socket.receive(r_packet);
+            packet rec_packet = packet.parseUDPdata(rec_data);
+
+            return rec_packet;
+        } catch ( Exception e ){
+            e.printStackTrace();
+        }
+
+
+    }
+
+    public static void main(String[] args) throws Exception {
+        //constant
+        final int maxDataLength = 500;
+        final int SeqNumModulo = 32;
+        final int window_size = 10;
+
+        String host_address = null;
+        int emulator_port = 0;
+        int rec_port = 0;
+        String filename = null;
+
+        if (args.length != 4) {
+            System.out.println("Wrong parameters");
+            System.exit(0);
+        } else {
+            host_address = args[0];
+            emulator_port = Integer.parseInt(args[1]);
+            rec_port = Integer.parseInt(args[2]);
+            filename = args[3];
+        }
+
+        //create the received and sending socket
+        DatagramSocket rec_socket = new DatagramSocket(rec_port);
+        DatagramSocket send_socket = new DatagramSocket(emulator_port);
+
+        //create the output file and arrival log
+        PrintWriter outputfile= new PrintWriter(filename);
+        PrintWriter arrival_log = new PrintWriter("arrival.log");
+
+        //Start to receive from sender
+        int expect_seq= 0;
+       // byte [] rec_data  = new byte[1024];
+
+        while(true) {
+            //Get the packet from emulator
+            DatagramPacket rec_packet = new DatagramPacket(rec_data,rec_data.length);
+            rec_socket.receive(rec_packet);
+            packet recPacket = packet.parseUDPdata(rec_packet.getData());
+            arrival_log.println(recPacket.getSeqNum());
+
+            //if it is the packet that we expect
+            if(expect_seq == recPacket.getSeqNum()) {
+                //if it is the Data packet
+                if(recPacket.getType() == 1) {
+                    packet ackPacket = packet.createACK(recPacket.getSeqNum());
+                    send_packet(send_socket,ackPacket,host_address,emulator_port);
+                    expect_seq++;
+                    expect_seq = expect_seq% SeqNumModulo;
+
+                    String write = new  String(recPacket.getData());
+                    outputfile.println(write);
+
+                }//if it is the eof packet
+                else if(recPacket.getType() ==2 ) {
+                    packet eof  = packet.createEOT(recPacket.getSeqNum());
+                    send_packet(send_socket,eof,host_address,emulator_port);
+
+                    arrival_log.close();
+                    outputfile.close();
+                    send_socket.close();
+                    rec_socket.close();
+                    System.exit(0);
+                }
+            }
+            //if it it not the packet that we expect
+            //then we discard the packet and resent an ACK packet for the most
+            //recently received in-order packet;
+            else{
+                packet last_packet = packet.createACK((expect_seq +31)%32);
+                send_packet(send_socket,last_packet,host_address,emulator_port);
+            }
+        }
+
+    }
+
+
+}
+
+
+import javax.swing.tree.ExpandVetoException;
+import java.io.*;
+import java.net.*;
+import java.math.*;
+
+public class sender {
+
+
+    static final int time = 500;
+
+
+    public static void send_packet(DatagramSocket send_socket, packet sendpacket, String Address, int dec_port) throws Exception{
+        byte [] content = sendpacket.getUDPdata();
+        InetAddress ip = InetAddress.getByName(Address);
+        try{
+            DatagramPacket send_packet  = new DatagramPacket(content, content.length,ip,dec_port);
+            send_socket.send(send_packet);
+        } catch(SocketException e){
+            e.printStackTrace();
+        }
+    }
+
+    public static packet rec_packet(DatagramSocket rec_socket) throws Exception {
+
+        packet rec_packet = null;
+        try{
+            byte[] rec_data = new byte[1024]; // since 500 for data, 4 for seq, 4 for type, 4 for data_length
+            DatagramPacket r_packet = new DatagramPacket(rec_data, rec_data.length);
+            //start to receive data
+            rec_socket.receive(r_packet);
+            rec_packet = packet.parseUDPdata(rec_data);
+
+        } catch ( Exception e ){
+            e.printStackTrace();
+        }
+
+        return rec_packet;
+    }
+
+
+
+    public static void main(String[] args) throws Exception {
+        //constant
+        final int maxDataLength = 500;
+        final int SeqNumModulo = 32;
+        final int window_size = 10;
+
+        String host_address = null;
+        int emulator_port = 0;
+        int rec_port = 0;
+        String filename = null;
+
+        //our output
+        PrintWriter seq_log = new PrintWriter("seqnum.log");
+        PrintWriter ack_log = new PrintWriter("ack.log");
+
+
+        if (args.length != 4) {
+            System.out.println("Wrong parameters");
+            System.exit(0);
+        } else {
+            host_address = args[0];
+            emulator_port = Integer.parseInt(args[1]);
+            rec_port = Integer.parseInt(args[2]);
+            filename = args[3];
+        }
+
+
+        //read from file
+        File file = new File(args[3]);
+        byte sentence[] = new byte[(int)file.length()];
+        FileInputStream fileinputstream = new FileInputStream(file);
+        fileinputstream.read(sentence);
+
+        //preapare packets
+        int size = sentence.length/500;
+        int transffered = 0;
+        if (sentence.length % 500 != 0) size += 1;
+        packet packets[] = new packet[size];
+        for (int i = 0; i < size; i++) {
+            byte cp[] = new byte[Math.min(500, sentence.length - transffered)];
+            System.arraycopy(sentence, transffered, cp, 0, Math.min(500, sentence.length - transffered));
+            packets[i] = packet.createPacket(i % 32, new String(cp));
+            transffered += 500;
+        }
+
+        System.out.println("hello you are here");
+        System.out.println(size);
+        //create socket
+        DatagramSocket send_socket = new DatagramSocket(emulator_port);  //rec sends to u-emulator
+        DatagramSocket rec_socket = new DatagramSocket(rec_port); // used to receive the Data
+        InetAddress ip = InetAddress.getByName(host_address);
+
+        //
+        //---------------------Now Start to send packet-----------------
+        //
+        int windowBase = 0;
+        int nextPacket = 0;
+        int timeOut = 500;
+        InetAddress IPAddress = InetAddress.getByName(args[0]);
+        //repeat sending from windowBase to windowBase + 10
+        while (windowBase != size) {
+            while (nextPacket < windowBase + 10 && nextPacket < size) {
+                send_packet(send_socket,packets[nextPacket],host_address,emulator_port);
+                seq_log.println(nextPacket % 32);
+                nextPacket++;
+            }
+            try { // could time out
+                rec_socket.setSoTimeout(timeOut);
+                //receive packet and record the ack num
+                packet rec_packet = rec_packet(rec_socket);
+                ack_log.println(rec_packet.getSeqNum());
+
+                if (rec_packet.getSeqNum() == windowBase % 32) {
+                    windowBase++;
+                } else if (rec_packet.getSeqNum() > windowBase % 32 &&
+                        (rec_packet.getSeqNum() - windowBase % 32) < 10) {
+                    windowBase += rec_packet.getSeqNum() - windowBase % 32 + 1;
+                } else if (rec_packet.getSeqNum() < 10 &&
+                        (rec_packet.getSeqNum() + 32 - windowBase % 32) < 10) {
+                    windowBase += rec_packet.getSeqNum() + 32 - windowBase % 32 + 1;
+                }
+            } catch (SocketTimeoutException e) { // lost all pac
+                for (int i = windowBase; i < nextPacket; i++) {
+                    //resend the packet and record the seq num
+                    send_packet(send_socket,packets[i],host_address,emulator_port);
+                    seq_log.println(i % 32);
+                }
+            }
+        }
+
+
+        //------------ALL packets are sent successfully ------------
+        //            Now send the EOT packet
+        packet eot_packet = packet.createEOT(size);
+        send_packet(send_socket,eot_packet,host_address,emulator_port);
+        seq_log.println(eot_packet.getSeqNum());
+        while (true) { //can not exit before EOT from receiver
+            try {
+                packet rec_packet =rec_packet(rec_socket);
+                ack_log.println(rec_packet.getSeqNum());
+                if (rec_packet.getType() == 2) {
+                    send_socket.close();
+                    rec_socket.close();
+                    seq_log.close();
+                    ack_log.close();
+                    System.exit(0);
+                }
+            } catch (SocketTimeoutException e) {
+                e.printStackTrace();
+            }
+        }
+
+
+    }
+
+}
+
